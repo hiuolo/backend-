@@ -5,13 +5,11 @@ import requests
 from datetime import datetime
 
 app = FastAPI()
-
-# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://mobiso-servicecentre.netlify.app"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_origins=["*"],  # или укажите конкретный сайт, если нужно
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -23,18 +21,6 @@ def dump_routes():
     for route in app.routes:
         logging.info(f"ROUTE: {route.path} METHODS: {route.methods}")
 
-
-import requests
-from datetime import datetime
-
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 TELEGRAM_BOT_TOKEN = "8137013358:AAHTfWc-CK9aT9h_v3ekIld0DnFBVIXXusQ"  # замените на реальный токен
 
@@ -108,6 +94,14 @@ async def receive_message(request: Request):
     )
     conn.commit()
     conn.close()
+    # После сохранения заявки отправляем уведомление пользователю
+    chat_id = data.get("chat_id")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": "Ваша заявка принята! Ожидайте ответа оператора."
+    }
+    requests.post(url, json=payload)
     return {"status": "получено"}
 
 @app.get("/api/chats")
@@ -193,4 +187,15 @@ async def delete_chat(request: Request):
     cur.execute("UPDATE requests SET deleted = 1 WHERE id = ?", (chat_id,))
     conn.commit()
     conn.close()
-    
+    return {"status": "deleted"}
+
+@app.post("/api/delete_chat")
+async def delete_chat(request: Request):
+    data = await request.json()
+    chat_id = data.get("chat_id")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE requests SET deleted = 1 WHERE id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
