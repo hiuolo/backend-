@@ -74,8 +74,7 @@ init_answers_table()
 @app.post("/api/message")
 async def receive_message(request: Request):
     data = await request.json()
-    print("Получена заявка:", data)  # Добавьте эту строку для отладки
-    # Ожидаются поля: user, phone, email, organization, branch, problem, comment, chat_id
+    print("Получена заявка:", data)
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -99,9 +98,16 @@ async def receive_message(request: Request):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": "Ваша заявка принята! Ожидайте ответа оператора."
+        "text": (
+            "Ваша заявка принята!\n"
+            f"Организация: {data.get('organization')}\n"
+            f"Филиал: {data.get('branch')}\n"
+            f"Проблема: {data.get('problem')}\n"
+            "Ожидайте ответа оператора."
+        )
     }
-    requests.post(url, json=payload)
+    resp = requests.post(url, json=payload)
+    # Можно добавить проверку resp.status_code и логировать ошибки
     return {"status": "получено"}
 
 @app.get("/api/chats")
@@ -143,18 +149,17 @@ async def operator_reply(request: Request):
         return {"status": "chat_id не найден"}
 
     reply_text = data["reply"]
-    # Сохраняем ответ в таблицу answers
     cur.execute(
         "INSERT INTO answers (request_id, chat_id, reply, created_at) VALUES (?, ?, ?, ?)",
         (data["chat_id"], chat_id, reply_text, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     )
     conn.commit()
     conn.close()
-    # Формируем запрос к Telegram Bot API для отправки сообщения пользователю
+    # Отправляем уведомление пользователю через Telegram Bot
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": reply_text
+        "text": f"Ответ оператора:\n{reply_text}"
     }
     resp = requests.post(url, json=payload)
     if resp.status_code == 200:
