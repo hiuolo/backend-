@@ -157,9 +157,15 @@ async def operator_reply(request: Request):
     conn.close()
     # Отправляем уведомление пользователю через Telegram Bot
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    # Сообщение с призывом открыть мини-приложение
+    notify_text = (
+        "Вам поступил ответ от оператора!\n"
+        "Откройте мини-приложение, чтобы прочитать ответ.\n\n"
+        f"Ответ: {reply_text}"
+    )
     payload = {
         "chat_id": chat_id,
-        "text": f"Ответ оператора:\n{reply_text}"
+        "text": notify_text
     }
     resp = requests.post(url, json=payload)
     if resp.status_code == 200:
