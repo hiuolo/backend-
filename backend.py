@@ -200,13 +200,21 @@ async def delete_chat(request: Request):
     conn.close()
     return {"status": "deleted"}
 
-@app.post("/api/delete_chat")
-async def delete_chat(request: Request):
-    data = await request.json()
-    chat_id = data.get("chat_id")
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE requests SET deleted = 1 WHERE id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    update = await request.json()
+    msg = update.get("message", {})
+    web_data = msg.get("web_app_data", {}).get("data")
+    if web_data:
+        chat_id = msg["chat"]["id"]
+        # Отправляем в чат простое уведомление о новом ответе
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": "📬 У вас новое уведомление!"
+            }
+        )
+    return {"ok": True}
+
 
