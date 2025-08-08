@@ -203,18 +203,18 @@ async def delete_chat(request: Request):
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     update = await request.json()
+    print("🔔 WEBHOOK UPDATE:", update)
     msg = update.get("message", {})
     web_data = msg.get("web_app_data", {}).get("data")
     if web_data:
-        chat_id = msg["chat"]["id"]
-        # Отправляем в чат простое уведомление о новом ответе
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": "📬 У вас новое уведомление!"
-            }
-        )
+        chat = msg.get("chat", {})
+        chat_id = chat.get("id")
+        if chat_id:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": "📬 Вам пришёл ответ от оператора! Откройте мини‑приложение, чтобы прочитать."}
+            )
+            print("sendMessage status:", resp.status_code, resp.text)
     return {"ok": True}
 
 
