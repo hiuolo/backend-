@@ -41,6 +41,7 @@ def init_db():
         email TEXT,
         organization TEXT,
         branch TEXT,
+        device TEXT,  # добавлено поле device
         problem TEXT,
         comment TEXT,
         chat_id TEXT,
@@ -78,13 +79,14 @@ async def receive_message(request: Request):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO requests (user, phone, email, organization, branch, problem, comment, chat_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO requests (user, phone, email, organization, branch, device, problem, comment, chat_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             data.get("user"),
             data.get("phone"),
             data.get("email"),
             data.get("organization"),
             data.get("branch"),
+            data.get("device"),  # сохраняем устройство
             data.get("problem"),
             data.get("comment"),
             data.get("chat_id"),
@@ -114,8 +116,7 @@ async def receive_message(request: Request):
 async def get_chats():
     conn = get_db()
     cur = conn.cursor()
-    # Возвращаем только не удалённые заявки
-    cur.execute("SELECT id, user, phone, email, organization, branch, problem, comment, chat_id, created_at FROM requests WHERE deleted IS NULL OR deleted = 0 ORDER BY id DESC")
+    cur.execute("SELECT id, user, phone, email, organization, branch, device, problem, comment, chat_id, created_at FROM requests WHERE deleted IS NULL OR deleted = 0 ORDER BY id DESC")
     rows = cur.fetchall()
     conn.close()
     return [
@@ -126,10 +127,11 @@ async def get_chats():
             "email": r[3],
             "organization": r[4],
             "branch": r[5],
-            "problem": r[6],
-            "comment": r[7],
-            "chat_id": r[8],
-            "created_at": r[9]
+            "device": r[6],  # добавлено
+            "problem": r[7],
+            "comment": r[8],
+            "chat_id": r[9],
+            "created_at": r[10]
         }
         for r in rows
     ]
