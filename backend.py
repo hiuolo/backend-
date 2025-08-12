@@ -92,32 +92,63 @@ class ReplyIn(BaseModel):
 def health():
     return {"ok": True, "time": datetime.now().isoformat(timespec="seconds")}
 
+# прием заявки — теперь принимает и JSON, и form-data/x-www-form-urlencoded
 @app.post("/api/message")
 async def receive_message(request: Request):
-    data = await request.json()
+    data = {}
+    # 1) JSON
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    # 2) form-data / x-www-form-urlencoded
+    if not data:
+        try:
+            form = await request.form()
+            data = dict(form)
+        except Exception:
+            data = {}
+
+    # минимальная нормализация
+    payload = {
+        "user":         (data.get("user") or "").strip(),
+        "phone":        (data.get("phone") or "").strip(),
+        "email":        (data.get("email") or "").strip(),
+        "organization": (data.get("organization") or "").strip(),
+        "branch":       (data.get("branch") or "").strip(),
+        "device":       (data.get("device") or "").strip(),
+        "problem":      (data.get("problem") or data.get("issue") or data.get("message") or "").strip(),
+        "comment":      (data.get("comment") or "").strip(),
+        "chat_id":      (data.get("chat_id") or "").strip(),
+    }
+
+    # записываем
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
         'INSERT INTO requests (user, phone, email, organization, branch, device, problem, comment, chat_id, created_at, deleted) '
         'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
         (
-            data.get("user"),
-            data.get("phone"),
-            data.get("email"),
-            data.get("organization"),
-            data.get("branch"),
-            data.get("device"),
-            data.get("problem"),
-            data.get("comment"),
-            data.get("chat_id"),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["user"],
+            payload["phone"],
+            payload["email"],
+            payload["organization"],
+            payload["branch"],
+            payload["device"],
+            payload["problem"],
+            payload["comment"],
+            payload["chat_id"],
+            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         )
     )
     req_id = cur.lastrowid
     conn.commit()
     conn.close()
 
-    chat_id = data.get("chat_id")
+    # уведомление о принятии (как было)
+    chat_id = payload["chat_id"]
     if chat_id and TELEGRAM_BOT_TOKEN:
         try:
             requests.post(
@@ -130,6 +161,7 @@ async def receive_message(request: Request):
 
     return {"status": "получено", "id": req_id}
 
+# список активных заявок
 @app.get("/api/chats")
 async def get_chats():
     conn = get_db()
@@ -144,6 +176,7 @@ async def get_chats():
     conn.close()
     return rows
 
+# ответ оператором — обычное уведомление от бота
 @app.post("/api/chats/{request_id}/reply")
 async def reply_via_chat_id(
     request_id: int = Path(..., alias="request_id"),
@@ -160,7 +193,7 @@ async def reply_via_chat_id(
     chat_id = row["chat_id"]
     cur.execute(
         "INSERT INTO answers (request_id, chat_id, reply, created_at) VALUES (?, ?, ?, ?)",
-        (request_id, chat_id, body.text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        (request_id, chat_id, body.text, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
     )
     conn.commit()
     conn.close()
@@ -178,6 +211,7 @@ async def reply_via_chat_id(
 
     return {"ok": True}
 
+# получить ответы по chat_id
 @app.get("/api/answers")
 async def get_answers(chat_id: str):
     conn = get_db()
@@ -190,6 +224,7 @@ async def get_answers(chat_id: str):
     conn.close()
     return rows
 
+# пометить заявку удаленной
 @app.post("/api/delete_chat")
 async def delete_chat(request: Request):
     data = await request.json()
