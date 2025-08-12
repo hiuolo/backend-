@@ -167,9 +167,10 @@ async def reply_via_chat_id(
 
     if TELEGRAM_BOT_TOKEN:
         try:
+            notify = "Вам поступил ответ от оператора. Откройте мини-приложение, чтобы прочитать."
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": f"Ответ от оператора{(' '+body.operator) if body.operator else ''}:\n{body.text}"},
+                json={"chat_id": chat_id, "text": notify},
                 timeout=8
             )
         except Exception:
