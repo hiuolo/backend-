@@ -5,18 +5,28 @@ import sqlite3
 import requests
 from datetime import datetime
 import os
+import json
 
-# ---------------- App & CORS ----------------
+# ===== CORS =====
+ALLOWED_ORIGINS = [
+    "https://mobiso-servicecentre.netlify.app",  # клиент
+    "https://mobiso-admin.netlify.app",          # операторская панель
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:5173",
+]
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,   # не "*" при allow_credentials=True
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
-# ---------------- Config ----------------
+# ===== Конфиг =====
 TELEGRAM_BOT_TOKEN = os.environ.get("8137013358:AAHTfWc-CK9aT9h_v3ekIld0DnFBVIXXusQ", "")
 DB_PATH = os.environ.get("DB_PATH", "db.sqlite3")
 
@@ -25,7 +35,7 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-# ---------------- DB init + safe migration ----------------
+# ===== Мягкие миграции БД =====
 def table_columns(conn, table):
     cur = conn.execute(f"PRAGMA table_info({table})")
     return {row[1] if isinstance(row, tuple) else row["name"] for row in cur.fetchall()}
@@ -39,18 +49,12 @@ def add_column_if_missing(conn, table, coldef):
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    # base tables
     cur.executescript('''
-        CREATE TABLE IF NOT EXISTS requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT
-        );
-        CREATE TABLE IF NOT EXISTS answers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT
-        );
+        CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY AUTOINCREMENT);
+        CREATE TABLE IF NOT EXISTS answers  (id INTEGER PRIMARY KEY AUTOINCREMENT);
     ''')
     conn.commit()
 
-    # ensure columns exist (idempotent)
     for coldef in [
         "user TEXT",
         "phone TEXT",
@@ -74,7 +78,6 @@ def init_db():
     ]:
         add_column_if_missing(conn, "answers", coldef)
 
-    # helpful indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_deleted ON requests(deleted)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_answers_chat ON answers(chat_id)")
     conn.commit()
@@ -82,17 +85,46 @@ def init_db():
 
 init_db()
 
-# ---------------- Schemas ----------------
+# ===== Утилиты =====
+def telegram_send(chat_id: str, text: str) -> bool:
+    """Отправка сообщения в Telegram с логированием результата."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("[telegram] no token configured")
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=8
+        )
+        try:
+            j = r.json()
+        except Exception:
+            j = {"raw": r.text[:200]}
+        ok = bool(j.get("ok"))
+        if not ok:
+            print("[telegram] sendMessage failed", r.status_code, json.dumps(j, ensure_ascii=False))
+        return ok
+    except Exception as e:
+        print("[telegram] exception", repr(e))
+        return False
+
+# ===== Схемы =====
 class ReplyIn(BaseModel):
     text: str
     operator: str | None = None
 
-# ---------------- Endpoints ----------------
+# ===== Эндпойнты =====
 @app.get("/api/health")
 def health():
-    return {"ok": True, "time": datetime.now().isoformat(timespec="seconds")}
+    return {
+        "ok": True,
+        "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "telegram_token_set": bool(TELEGRAM_BOT_TOKEN),
+        "allowed_origins": ALLOWED_ORIGINS,
+    }
 
-# прием заявки — теперь принимает и JSON, и form-data/x-www-form-urlencoded
+# Приём заявки — JSON ИЛИ form-data
 @app.post("/api/message")
 async def receive_message(request: Request):
     data = {}
@@ -111,7 +143,6 @@ async def receive_message(request: Request):
         except Exception:
             data = {}
 
-    # минимальная нормализация
     payload = {
         "user":         (data.get("user") or "").strip(),
         "phone":        (data.get("phone") or "").strip(),
@@ -124,7 +155,6 @@ async def receive_message(request: Request):
         "chat_id":      (data.get("chat_id") or "").strip(),
     }
 
-    # записываем
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -147,21 +177,11 @@ async def receive_message(request: Request):
     conn.commit()
     conn.close()
 
-    # уведомление о принятии (как было)
-    chat_id = payload["chat_id"]
-    if chat_id and TELEGRAM_BOT_TOKEN:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": "Ваша заявка принята. Ожидайте ответ оператора."},
-                timeout=8
-            )
-        except Exception:
-            pass
+    if payload["chat_id"]:
+        telegram_send(payload["chat_id"], "Ваша заявка принята. Ожидайте ответ оператора.")
 
     return {"status": "получено", "id": req_id}
 
-# список активных заявок
 @app.get("/api/chats")
 async def get_chats():
     conn = get_db()
@@ -176,7 +196,6 @@ async def get_chats():
     conn.close()
     return rows
 
-# ответ оператором — обычное уведомление от бота
 @app.post("/api/chats/{request_id}/reply")
 async def reply_via_chat_id(
     request_id: int = Path(..., alias="request_id"),
@@ -198,20 +217,9 @@ async def reply_via_chat_id(
     conn.commit()
     conn.close()
 
-    if TELEGRAM_BOT_TOKEN:
-        try:
-            notify = "Вам поступил ответ от оператора. Откройте мини-приложение, чтобы прочитать."
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": notify},
-                timeout=8
-            )
-        except Exception:
-            pass
-
+    telegram_send(chat_id, "Вам поступил ответ от оператора. Откройте мини-приложение, чтобы прочитать.")
     return {"ok": True}
 
-# получить ответы по chat_id
 @app.get("/api/answers")
 async def get_answers(chat_id: str):
     conn = get_db()
@@ -224,7 +232,6 @@ async def get_answers(chat_id: str):
     conn.close()
     return rows
 
-# пометить заявку удаленной
 @app.post("/api/delete_chat")
 async def delete_chat(request: Request):
     data = await request.json()
