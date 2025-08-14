@@ -7,23 +7,15 @@ from datetime import datetime
 import os
 import json
 
-# ===== CORS =====
-ALLOWED_ORIGINS = [
-    "https://mobiso-servicecentre.netlify.app",  # клиент
-    "https://mobiso-admin.netlify.app",          # операторская панель
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "http://localhost:5173",
-]
-
+# ===== CORS (диагностический, максимально разрешительный) =====
+# ВАЖНО: при allow_origins=["*"] нужно allow_credentials=False, иначе браузер не примет заголовок.
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,   # не "*" при allow_credentials=True
-    allow_credentials=True,
-    allow_methods=["*"],    
+    allow_origins=["*"],     # временно для снятия CORS-блоков
+    allow_credentials=False, # ОБЯЗАТЕЛЬНО False при "*"
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 # ===== Конфиг =====
@@ -121,7 +113,7 @@ def health():
         "ok": True,
         "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "telegram_token_set": bool(TELEGRAM_BOT_TOKEN),
-        "allowed_origins": ALLOWED_ORIGINS,
+        "cors": {"allow_origins": "*", "allow_credentials": False},
     }
 
 # Приём заявки — JSON ИЛИ form-data
