@@ -27,7 +27,7 @@ app.add_middleware(
 )
 
 # ===== Конфиг =====
-TELEGRAM_BOT_TOKEN = os.environ.get("8137013358:AAHTfWc-CK9aT9h_v3ekIld0DnFBVIXXusQ", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DB_PATH = os.environ.get("DB_PATH", "db.sqlite3")
 
 def get_db():
