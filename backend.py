@@ -6,14 +6,15 @@ import requests
 from datetime import datetime
 import os
 import json
+import platform
 
 # ===== CORS (диагностический, максимально разрешительный) =====
-# ВАЖНО: при allow_origins=["*"] нужно allow_credentials=False, иначе браузер не примет заголовок.
+# Важно: при allow_origins=["*"] нужно allow_credentials=False, иначе браузер не примет заголовок.
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],     # временно для снятия CORS-блоков
-    allow_credentials=False, # ОБЯЗАТЕЛЬНО False при "*"
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -78,11 +79,12 @@ def init_db():
 init_db()
 
 # ===== Утилиты =====
-def telegram_send(chat_id: str, text: str) -> bool:
-    """Отправка сообщения в Telegram с логированием результата."""
+def telegram_send(chat_id: str, text: str) -> dict:
+    """Отправка сообщения в Telegram с логированием результата. Возвращает JSON-ответ Telegram."""
     if not TELEGRAM_BOT_TOKEN:
-        print("[telegram] no token configured")
-        return False
+        msg = {"ok": False, "error": "no token configured"}
+        print("[telegram]", msg)
+        return msg
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -92,31 +94,46 @@ def telegram_send(chat_id: str, text: str) -> bool:
         try:
             j = r.json()
         except Exception:
-            j = {"raw": r.text[:200]}
-        ok = bool(j.get("ok"))
-        if not ok:
+            j = {"ok": False, "raw": r.text[:200]}
+        if not j.get("ok"):
             print("[telegram] sendMessage failed", r.status_code, json.dumps(j, ensure_ascii=False))
-        return ok
+        return j
     except Exception as e:
+        msg = {"ok": False, "exception": repr(e)}
         print("[telegram] exception", repr(e))
-        return False
+        return msg
 
 # ===== Схемы =====
 class ReplyIn(BaseModel):
     text: str
     operator: str | None = None
 
-# ===== Эндпойнты =====
+# ===== Базовые проверки =====
+@app.get("/")
+def root():
+    return {"alive": True, "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z"}
+
+@app.get("/api/ping")
+def ping():
+    return {"pong": True}
+
 @app.get("/api/health")
-def health():
+def health(request: Request):
     return {
         "ok": True,
         "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "python": platform.python_version(),
+        "client_origin": request.headers.get("origin"),
         "telegram_token_set": bool(TELEGRAM_BOT_TOKEN),
         "cors": {"allow_origins": "*", "allow_credentials": False},
     }
 
-# Приём заявки — JSON ИЛИ form-data
+@app.get("/api/notify_test")
+def notify_test(chat_id: str, text: str = "Тестовое уведомление от сервера"):
+    """Пробная отправка сообщения в Telegram для проверки токена/доставки."""
+    return telegram_send(chat_id, text)
+
+# ===== Приём заявки — JSON ИЛИ form-data =====
 @app.post("/api/message")
 async def receive_message(request: Request):
     data = {}
@@ -174,6 +191,7 @@ async def receive_message(request: Request):
 
     return {"status": "получено", "id": req_id}
 
+# ===== Заявки/ответы =====
 @app.get("/api/chats")
 async def get_chats():
     conn = get_db()
