@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Request, HTTPException, Path, Body
+from fastapi import FastAPI, Request, HTTPException, Path, Body, Response
+from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import sqlite3
@@ -8,9 +9,11 @@ import os
 import json
 import platform
 
-# ===== CORS (диагностический, максимально разрешительный) =====
-# Важно: при allow_origins=["*"] нужно allow_credentials=False, иначе браузер не примет заголовок.
+# ===== БАЗОВАЯ НАСТРОЙКА ПРИЛОЖЕНИЯ =====
 app = FastAPI()
+
+# 1) Пермишсивный CORS через встроенное middleware
+#    (allow_credentials=False обязательно при "*")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,7 +22,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===== Конфиг =====
+# 2) Дополнительное "страхующее" middleware:
+#    добавляет CORS-заголовки в ЛЮБОЙ ответ (в т.ч. при исключениях и 404)
+@app.middleware("http")
+async def force_cors_headers(request: Request, call_next):
+    try:
+        resp = await call_next(request)
+    except Exception as e:
+        # чтобы даже при исключении был корректный CORS
+        body = {"ok": False, "error": "internal", "detail": repr(e)}
+        resp = JSONResponse(body, status_code=500)
+    # расставляем заголовки (если не расставлены)
+    h = resp.headers
+    h.setdefault("Access-Control-Allow-Origin", "*")
+    h.setdefault("Access-Control-Allow-Methods", "*")
+    h.setdefault("Access-Control-Allow-Headers", "*")
+    return resp
+
+# 3) Обработчик preflight на любой путь
+@app.options("/{full_path:path}")
+def any_preflight(full_path: str, request: Request):
+    # Echo заголовков из запроса — это лучший UX для браузера
+    acrh = request.headers.get("Access-Control-Request-Headers", "*")
+    acrm = request.headers.get("Access-Control-Request-Method", "*")
+    resp = Response(status_code=204)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = acrh
+    resp.headers["Access-Control-Allow-Methods"] = acrm
+    return resp
+
+# ===== КОНФИГ =====
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DB_PATH = os.environ.get("DB_PATH", "db.sqlite3")
 
@@ -28,10 +60,10 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-# ===== Мягкие миграции БД =====
+# ===== МЯГКИЕ МИГРАЦИИ БД =====
 def table_columns(conn, table):
     cur = conn.execute(f"PRAGMA table_info({table})")
-    return {row[1] if isinstance(row, tuple) else row["name"] for row in cur.fetchall()}
+    return { (row[1] if isinstance(row, tuple) else row["name"]) for row in cur.fetchall() }
 
 def add_column_if_missing(conn, table, coldef):
     name = coldef.split()[0]
@@ -42,33 +74,20 @@ def add_column_if_missing(conn, table, coldef):
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    cur.executescript('''
+    cur.executescript("""
         CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY AUTOINCREMENT);
         CREATE TABLE IF NOT EXISTS answers  (id INTEGER PRIMARY KEY AUTOINCREMENT);
-    ''')
+    """)
     conn.commit()
 
     for coldef in [
-        "user TEXT",
-        "phone TEXT",
-        "email TEXT",
-        "organization TEXT",
-        "branch TEXT",
-        "device TEXT",
-        "problem TEXT",
-        "comment TEXT",
-        "chat_id TEXT",
-        "created_at TEXT",
-        "deleted INTEGER DEFAULT 0"
+        "user TEXT","phone TEXT","email TEXT","organization TEXT","branch TEXT",
+        "device TEXT","problem TEXT","comment TEXT","chat_id TEXT",
+        "created_at TEXT","deleted INTEGER DEFAULT 0"
     ]:
         add_column_if_missing(conn, "requests", coldef)
 
-    for coldef in [
-        "request_id INTEGER",
-        "chat_id TEXT",
-        "reply TEXT",
-        "created_at TEXT"
-    ]:
+    for coldef in ["request_id INTEGER","chat_id TEXT","reply TEXT","created_at TEXT"]:
         add_column_if_missing(conn, "answers", coldef)
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_deleted ON requests(deleted)")
@@ -78,9 +97,9 @@ def init_db():
 
 init_db()
 
-# ===== Утилиты =====
+# ===== УТИЛИТЫ =====
 def telegram_send(chat_id: str, text: str) -> dict:
-    """Отправка сообщения в Telegram с логированием результата. Возвращает JSON-ответ Telegram."""
+    """Отправка сообщения в Telegram с логированием результата."""
     if not TELEGRAM_BOT_TOKEN:
         msg = {"ok": False, "error": "no token configured"}
         print("[telegram]", msg)
@@ -89,7 +108,7 @@ def telegram_send(chat_id: str, text: str) -> dict:
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": text},
-            timeout=8
+            timeout=8,
         )
         try:
             j = r.json()
@@ -103,12 +122,11 @@ def telegram_send(chat_id: str, text: str) -> dict:
         print("[telegram] exception", repr(e))
         return msg
 
-# ===== Схемы =====
 class ReplyIn(BaseModel):
     text: str
     operator: str | None = None
 
-# ===== Базовые проверки =====
+# ===== ДИАГНОСТИКА =====
 @app.get("/")
 def root():
     return {"alive": True, "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z"}
@@ -125,26 +143,29 @@ def health(request: Request):
         "python": platform.python_version(),
         "client_origin": request.headers.get("origin"),
         "telegram_token_set": bool(TELEGRAM_BOT_TOKEN),
-        "cors": {"allow_origins": "*", "allow_credentials": False},
+        "cors": {"forced_headers": True, "allow_origins": "*", "allow_credentials": False},
     }
+
+@app.get("/api/echo_headers")
+def echo_headers(request: Request):
+    # Возвращает все заголовки запроса (удобно видеть Origin/Host и т.п.)
+    return {k.lower(): v for k, v in request.headers.items()}
 
 @app.get("/api/notify_test")
 def notify_test(chat_id: str, text: str = "Тестовое уведомление от сервера"):
-    """Пробная отправка сообщения в Telegram для проверки токена/доставки."""
     return telegram_send(chat_id, text)
 
-# ===== Приём заявки — JSON ИЛИ form-data =====
+# ===== ФУНКЦИОНАЛ =====
 @app.post("/api/message")
 async def receive_message(request: Request):
+    # и JSON, и form-data
     data = {}
-    # 1) JSON
     try:
         data = await request.json()
         if not isinstance(data, dict):
             data = {}
     except Exception:
         data = {}
-    # 2) form-data / x-www-form-urlencoded
     if not data:
         try:
             form = await request.form()
@@ -170,16 +191,9 @@ async def receive_message(request: Request):
         'INSERT INTO requests (user, phone, email, organization, branch, device, problem, comment, chat_id, created_at, deleted) '
         'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
         (
-            payload["user"],
-            payload["phone"],
-            payload["email"],
-            payload["organization"],
-            payload["branch"],
-            payload["device"],
-            payload["problem"],
-            payload["comment"],
-            payload["chat_id"],
-            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            payload["user"], payload["phone"], payload["email"], payload["organization"], payload["branch"],
+            payload["device"], payload["problem"], payload["comment"], payload["chat_id"],
+            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         )
     )
     req_id = cur.lastrowid
@@ -188,19 +202,15 @@ async def receive_message(request: Request):
 
     if payload["chat_id"]:
         telegram_send(payload["chat_id"], "Ваша заявка принята. Ожидайте ответ оператора.")
-
     return {"status": "получено", "id": req_id}
 
-# ===== Заявки/ответы =====
 @app.get("/api/chats")
 async def get_chats():
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
         'SELECT id, user, phone, email, organization, branch, device, problem, comment, chat_id, created_at, deleted '
-        'FROM requests '
-        'WHERE COALESCE(deleted, 0) = 0 '
-        'ORDER BY id DESC'
+        'FROM requests WHERE COALESCE(deleted, 0) = 0 ORDER BY id DESC'
     )
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
