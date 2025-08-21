@@ -1,3 +1,5 @@
+
+from fastapi import FastAPI, Request, HTTPException, Path, Body, Response, Header
 from fastapi import FastAPI, Request, HTTPException, Path, Body, Response
 from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +56,9 @@ def any_preflight(full_path: str, request: Request):
 # ===== КОНФИГ =====
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DB_PATH = os.environ.get("DB_PATH", "db.sqlite3")
+CLIENT_URL = os.environ.get("CLIENT_URL", "https://mobiso-servicecentre.netlify.app")
+WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -98,16 +103,19 @@ def init_db():
 init_db()
 
 # ===== УТИЛИТЫ =====
-def telegram_send(chat_id: str, text: str) -> dict:
+def telegram_send(chat_id: str, text: str, reply_markup: dict | None = None) -> dict:
     """Отправка сообщения в Telegram с логированием результата."""
     if not TELEGRAM_BOT_TOKEN:
         msg = {"ok": False, "error": "no token configured"}
         print("[telegram]", msg)
         return msg
     try:
+        payload = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
+            json=payload,
             timeout=8,
         )
         try:
@@ -121,6 +129,7 @@ def telegram_send(chat_id: str, text: str) -> dict:
         msg = {"ok": False, "exception": repr(e)}
         print("[telegram] exception", repr(e))
         return msg
+
 
 class ReplyIn(BaseModel):
     text: str
@@ -154,6 +163,48 @@ def echo_headers(request: Request):
 @app.get("/api/notify_test")
 def notify_test(chat_id: str, text: str = "Тестовое уведомление от сервера"):
     return telegram_send(chat_id, text)
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None)
+):
+    # Проверка секрета (если задан)
+    if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
+        return {"ok": True}
+
+    try:
+        upd = await request.json()
+    except Exception:
+        return {"ok": True}
+
+    msg = upd.get("message") or upd.get("edited_message") or {}
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+    text = (msg.get("text") or "").strip()
+
+    # Если пользователь прислал контакт (кнопка 'request_contact')
+    contact = msg.get("contact") or {}
+    if contact.get("user_id") and chat_id:
+        link = f"{CLIENT_URL}/?chat_id={chat_id}"
+        telegram_send(str(chat_id), f"Спасибо! Откройте панель: {link}")
+        return {"ok": True}
+
+    # При /start — отправляем ссылку и (опционально) кнопку для отправки контакта
+    if text == "/start" and chat_id:
+        link = f"{CLIENT_URL}/?chat_id={chat_id}"
+        kb = {
+            "keyboard": [[{"text": "Отправить мой контакт ☎️", "request_contact": True}]],
+            "resize_keyboard": True,
+            "one_time_keyboard": True,
+        }
+        telegram_send(str(chat_id),
+                      "Чтобы связать чат с панелью, нажмите кнопку ниже "
+                      "или откройте панель по ссылке:\n" + link,
+                      reply_markup=kb)
+        return {"ok": True}
+
+    return {"ok": True}
 
 # ===== ФУНКЦИОНАЛ =====
 @app.post("/api/message")
