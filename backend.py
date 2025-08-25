@@ -1,4 +1,6 @@
-
+import hmac, hashlib, json
+from urllib.parse import parse_qsl
+from fastapi import Body
 from fastapi import FastAPI, Request, HTTPException, Path, Body, Response, Header
 from fastapi import FastAPI, Request, HTTPException, Path, Body, Response
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -59,7 +61,6 @@ DB_PATH = os.environ.get("DB_PATH", "db.sqlite3")
 CLIENT_URL = os.environ.get("CLIENT_URL", "https://mobiso-servicecentre.netlify.app")
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
-
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -83,7 +84,47 @@ def init_db():
         CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY AUTOINCREMENT);
         CREATE TABLE IF NOT EXISTS answers  (id INTEGER PRIMARY KEY AUTOINCREMENT);
     """)
-    conn.commit()
+    
+    def validate_twa_init_data(init_data: str, bot_token: str):
+        if not init_data or not bot_token:
+            return False, {"reason": "empty init_data or token"}
+    
+        pairs = parse_qsl(init_data, keep_blank_values=True)
+        data = dict(pairs)
+    
+        provided_hash = data.pop("hash", None)
+        data.pop("signature", None)
+    
+        data_check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data.keys()))
+    
+        secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+        calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    
+        if provided_hash != calc_hash:
+            return False, {"reason": "bad hash", "calc": calc_hash, "given": provided_hash}
+    
+        user_obj = None
+        chat_obj = None
+        if "user" in data:
+            try:
+                user_obj = json.loads(data["user"])
+            except:
+                pass
+        if "chat" in data:
+            try:
+                chat_obj = json.loads(data["chat"])
+            except:
+                pass
+    
+        chat_id = None
+        if isinstance(user_obj, dict) and "id" in user_obj:
+            chat_id = str(user_obj["id"])
+        elif isinstance(chat_obj, dict) and "id" in chat_obj:
+            chat_id = str(chat_obj["id"])
+    
+        return True, {"chat_id": chat_id, "user": user_obj, "chat": chat_obj}
+    
+        conn.commit()
 
     for coldef in [
         "user TEXT","phone TEXT","email TEXT","organization TEXT","branch TEXT",
@@ -163,6 +204,15 @@ def echo_headers(request: Request):
 @app.get("/api/notify_test")
 def notify_test(chat_id: str, text: str = "Тестовое уведомление от сервера"):
     return telegram_send(chat_id, text)
+
+@app.post("/api/twa/resolve")
+async def twa_resolve(payload: dict = Body(...)):
+    init_data = payload.get("init_data")
+    ok, info = validate_twa_init_data(init_data, TELEGRAM_BOT_TOKEN)
+    if not ok or not info.get("chat_id"):
+        raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid_init_data", "info": info})
+    return {"ok": True, "chat_id": info["chat_id"]}
+
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(
