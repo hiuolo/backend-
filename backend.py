@@ -1,8 +1,7 @@
+from fastapi import FastAPI, Request, HTTPException, Path, Body, Response, Header
 import hmac, hashlib, json
 from urllib.parse import parse_qsl
 from fastapi import Body
-from fastapi import FastAPI, Request, HTTPException, Path, Body, Response, Header
-from fastapi import FastAPI, Request, HTTPException, Path, Body, Response
 from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -77,6 +76,46 @@ def add_column_if_missing(conn, table, coldef):
     if name not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
 
+def validate_twa_init_data(init_data: str, bot_token: str):
+    if not init_data or not bot_token:
+        return False, {"reason": "empty init_data or token"}
+
+    from urllib.parse import parse_qsl
+    import hmac, hashlib, json
+
+    pairs = parse_qsl(init_data, keep_blank_values=True)
+    data = dict(pairs)
+
+    provided_hash = data.pop("hash", None)
+    data.pop("signature", None)  # на всякий случай
+
+    data_check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data.keys()))
+    secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+    calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if provided_hash != calc_hash:
+        return False, {"reason": "bad hash", "calc": calc_hash, "given": provided_hash}
+
+    user_obj = None
+    chat_obj = None
+    if "user" in data:
+        try: user_obj = json.loads(data["user"])
+        except: pass
+    if "chat" in data:
+        try: chat_obj = json.loads(data["chat"])
+        except: pass
+
+    user_id = str(user_obj["id"]) if isinstance(user_obj, dict) and "id" in user_obj else None
+    chat_id = str(chat_obj["id"]) if isinstance(chat_obj, dict) and "id" in chat_obj else None
+    preferred = user_id or chat_id
+
+    return True, {
+        "preferred_chat_id": preferred,
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "user": user_obj,
+        "chat": chat_obj
+    }
+
 def init_db():
     conn = get_db()
     cur = conn.cursor()
@@ -84,47 +123,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY AUTOINCREMENT);
         CREATE TABLE IF NOT EXISTS answers  (id INTEGER PRIMARY KEY AUTOINCREMENT);
     """)
-    
-    def validate_twa_init_data(init_data: str, bot_token: str):
-        if not init_data or not bot_token:
-            return False, {"reason": "empty init_data or token"}
-    
-        pairs = parse_qsl(init_data, keep_blank_values=True)
-        data = dict(pairs)
-    
-        provided_hash = data.pop("hash", None)
-        data.pop("signature", None)
-    
-        data_check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data.keys()))
-    
-        secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
-        calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-    
-        if provided_hash != calc_hash:
-            return False, {"reason": "bad hash", "calc": calc_hash, "given": provided_hash}
-    
-        user_obj = None
-        chat_obj = None
-        if "user" in data:
-            try:
-                user_obj = json.loads(data["user"])
-            except:
-                pass
-        if "chat" in data:
-            try:
-                chat_obj = json.loads(data["chat"])
-            except:
-                pass
-    
-        chat_id = None
-        if isinstance(user_obj, dict) and "id" in user_obj:
-            chat_id = str(user_obj["id"])
-        elif isinstance(chat_obj, dict) and "id" in chat_obj:
-            chat_id = str(chat_obj["id"])
-    
-        return True, {"chat_id": chat_id, "user": user_obj, "chat": chat_obj}
-    
-        conn.commit()
+    conn.commit()
 
     for coldef in [
         "user TEXT","phone TEXT","email TEXT","organization TEXT","branch TEXT",
@@ -205,13 +204,36 @@ def echo_headers(request: Request):
 def notify_test(chat_id: str, text: str = "Тестовое уведомление от сервера"):
     return telegram_send(chat_id, text)
 
+@app.get("/api/diag/getchat")
+def diag_getchat(chat_id: str):
+    """Проверить, «видит» ли бот этот чат (Telegram getChat)."""
+    if not TELEGRAM_BOT_TOKEN:
+        return {"ok": False, "error": "no token"}
+    r = requests.get(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getChat",
+        params={"chat_id": chat_id.strip()},
+        timeout=8
+    )
+    try:
+        return {"status": r.status_code, "json": r.json()}
+    except Exception:
+        return {"status": r.status_code, "text": r.text[:400]}
+
+@app.get("/api/diag/sendtest")
+def diag_sendtest(chat_id: str):
+    """Попытка отправки тестового сообщения в указанный chat_id."""
+    return telegram_send(chat_id.strip(), "Тестовое уведомление от бота")
+
+
 @app.post("/api/twa/resolve")
 async def twa_resolve(payload: dict = Body(...)):
     init_data = payload.get("init_data")
     ok, info = validate_twa_init_data(init_data, TELEGRAM_BOT_TOKEN)
-    if not ok or not info.get("chat_id"):
+    if not ok or not info.get("preferred_chat_id"):
         raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid_init_data", "info": info})
-    return {"ok": True, "chat_id": info["chat_id"]}
+    # лог — чтобы видеть, что реально вернули
+    print("[twa_resolve]", info)
+    return {"ok": True, **info}
 
 
 @app.post("/telegram/webhook")
@@ -356,11 +378,18 @@ async def get_answers(chat_id: str):
 @app.post("/api/delete_chat")
 async def delete_chat(request: Request):
     data = await request.json()
-    req_id = data.get("id") or data.get("chat_id")
-    if req_id is None:
-        raise HTTPException(status_code=400, detail="id is required")
+    req_id = data.get("id")
+    chat_id = data.get("chat_id")
+    if req_id is None and not chat_id:
+        raise HTTPException(status_code=400, detail="id or chat_id is required")
+
     conn = get_db()
-    conn.execute("UPDATE requests SET deleted=1 WHERE id=?", (req_id,))
+    cur = conn.cursor()
+    if req_id is not None:
+        cur.execute("UPDATE requests SET deleted=1 WHERE id=?", (req_id,))
+    else:
+        cur.execute("UPDATE requests SET deleted=1 WHERE chat_id=?", (str(chat_id),))
     conn.commit()
     conn.close()
     return {"status": "deleted"}
+
